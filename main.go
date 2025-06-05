@@ -3,10 +3,13 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"log"
 	"os"
 	"strings"
 
+	"github.com/jmoiron/sqlx"
+	_ "github.com/lib/pq"
 	"github.com/tmc/langchaingo/embeddings"
 	"github.com/tmc/langchaingo/llms/openai"
 )
@@ -53,10 +56,59 @@ func main() {
 		log.Fatal(err)
 	}
 
+	psqlDB, err := sqlx.Connect("postgres", "user=postgres password=pheet1234 host=127.0.0.1 port=5432 dbname=pheet_db_dev sslmode=disable")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer psqlDB.Close()
+
 	ctx := context.Background()
 	embedding, err := embedder.EmbedDocuments(ctx, lines)
 	if err != nil {
 		log.Fatal(err)
 	}
 	log.Printf("Embedding for: %v", embedding)
+
+	docs := make([]*Document, 0)
+	for index := range lines {
+		bu, _ := json.Marshal(embedding[index])
+		docs = append(docs, &Document{
+			Content:   lines[index],
+			Embedding: string(bu),
+		})
+	}
+
+	if err := CreateDocument(psqlDB, ctx, docs); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func CreateDocument(a *sqlx.DB, ctx context.Context, documents []*Document) error {
+	tx, err := a.Beginx()
+	if err != nil {
+		return err
+	}
+
+	scriptSQL := `
+		INSERT INTO documents (
+			content,
+			embedding
+		) VALUES (
+			$1::text,
+			$2::vector
+		)
+	`
+
+	for index := range documents {
+		_, err := tx.Exec(scriptSQL,
+			documents[index].Content,
+			documents[index].Embedding,
+		)
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+
+	return tx.Commit()
 }
